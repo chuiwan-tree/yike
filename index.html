@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>一棵</title>
+<style>
+  body { background: #f0eee4; color: #333; font: 15px/1.7 -apple-system, "PingFang SC", "Hiragino Sans GB", sans-serif; margin: 0; padding: 18px; }
+  #wrap { max-width: 1000px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 0 0 6px; font-weight: 600; }
+  .intro { color: #555; margin: 0 0 12px; }
+  canvas { display: block; max-width: 100%; height: auto; cursor: crosshair; background: #f0eee4; }
+  #bar { margin: 10px 0; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  button { font: inherit; padding: 5px 14px; border: 1px solid #888; background: #fff; border-radius: 4px; cursor: pointer; }
+  button:disabled { color: #aaa; border-color: #ccc; cursor: default; }
+  #pick { color: #444; }
+  #status { white-space: pre-wrap; margin: 6px 0; }
+  #log { white-space: pre-wrap; color: #444; border-left: 3px solid #ccc; padding-left: 10px; margin: 8px 0 16px; }
+  #log .dec { color: #000; margin-top: 8px; }
+  #log .mine { color: #b02a1e; }
+  #end { white-space: pre-wrap; }
+  .cap { color: #666; font-size: 13px; margin-top: 4px; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <h1>一棵</h1>
+  <p class="intro">这里有一片林子，它自己长。林子底下有一棵红的小树，是你的。<br>
+  每十年你可以砍掉一棵树（在图上点它），也可以不砍，然后过十年。到第 300 年为止。</p>
+  <canvas id="cv" width="980" height="500"></canvas>
+  <div class="cap">红的是你的。描黑边、写了号的，是冠伸到它头顶上的。地上那一条越亮，那里的小苗越晒得到。</div>
+  <div id="bar">
+    <span id="pick">点图上的一棵树，选中它。</span>
+    <button id="cutb" disabled>砍</button>
+    <button id="passb">过十年</button>
+  </div>
+  <div id="status"></div>
+  <div id="log"></div>
+  <div id="end"></div>
+</div>
+<script src="core.js"></script>
+<script src="play.js"></script>
+<script>
+(function () {
+  const L = window.林, Y = window.一棵, S = 7, ME = 6570;
+  const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+  const $ = (id) => document.getElementById(id);
+  let game = null, sel = null, hulls = [];
+
+  function hull(pts) {
+    const key = new Set(); pts = pts.filter(p => { const k = p[0].toFixed(4) + ',' + p[1].toFixed(4); if (key.has(k)) return false; key.add(k); return true; });
+    pts.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+    if (pts.length < 3) return pts;
+    const cr = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+    const lo = [], up = [];
+    for (const p of pts) { while (lo.length >= 2 && cr(lo[lo.length - 2], lo[lo.length - 1], p) <= 0) lo.pop(); lo.push(p); }
+    for (let i = pts.length - 1; i >= 0; i--) { const p = pts[i]; while (up.length >= 2 && cr(up[up.length - 2], up[up.length - 1], p) <= 0) up.pop(); up.push(p); }
+    return lo.slice(0, -1).concat(up.slice(0, -1));
+  }
+  function inPoly(x, y, poly) {
+    let c = false;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+      const [xi, yi] = poly[i], [xj, yj] = poly[j];
+      if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) c = !c;
+    }
+    return c;
+  }
+
+  // 画法照 林.py 的 draw2：每棵树只画冠的轮廓（叶梢围起来），矮的压在上面；你那棵红，冠伸到它头顶上的描黑边、写号
+  function draw(canvas, F, me, cuts, title, keepHulls) {
+    const c = canvas.getContext('2d');
+    const tops = new Map(); let maxTop = 40;
+    for (const t of F.trees) { const h = L.height(t); tops.set(t.id, h); if (h > maxTop) maxTop = h; }
+    const h = Math.floor(maxTop + 10), Hh = h * S;
+    canvas.width = L.W * S; canvas.height = Hh + 46;
+    c.fillStyle = 'rgb(240,238,228)'; c.fillRect(0, 0, canvas.width, canvas.height);
+    const P = (x, y) => [x * S, (h - 6 - y) * S];
+    const tgt = F.trees.find(t => t.id === me) || null;
+    const shaders = new Set();
+    if (tgt) {
+      const tl = L.walk(tgt.root).filter(m => m.main === null || m.lat === null);
+      const x0 = Math.min(...tl.map(m => m.x1)) - 2, x1 = Math.max(...tl.map(m => m.x1)) + 2, th = tops.get(tgt.id);
+      for (const t of F.trees) if (t !== tgt && L.walk(t.root).some(m => m.x1 >= x0 && m.x1 <= x1 && m.y1 > th)) shaders.add(t.id);
+    }
+    const order = F.trees.slice().sort((a, b) => tops.get(b.id) - tops.get(a.id));
+    const hs = [];
+    for (const t of order) {
+      const tips = L.walk(t.root).filter(m => m.main === null || m.lat === null).map(m => [m.x1, m.y1]);
+      let base = t.kind === 'pine' ? [40, 110, 90] : [190, 165, 50];
+      if (t.id === me) base = [220, 40, 30];
+      const a = tops.get(t.id) > 8 ? 150 : 220;
+      const hp = hull(tips.concat([[t.x, 0]]));
+      c.strokeStyle = 'rgba(110,95,80,0.78)'; c.lineWidth = Math.max(1, Math.floor(Math.pow(L.count(t.root), 0.3)));
+      c.beginPath(); c.moveTo(...P(t.x, 0)); c.lineTo(...P(t.x, tops.get(t.id) * 0.6)); c.stroke();
+      if (hp.length >= 3) {
+        c.beginPath(); hp.forEach((p, i) => { const q = P(p[0], p[1]); i ? c.lineTo(...q) : c.moveTo(...q); }); c.closePath();
+        c.fillStyle = `rgba(${base[0]},${base[1]},${base[2]},${(a >> 1) / 255})`; c.fill();
+        c.lineWidth = shaders.has(t.id) ? 3 : 1; c.strokeStyle = shaders.has(t.id) ? '#000' : `rgb(${base[0]},${base[1]},${base[2]})`; c.stroke();
+        if (sel === t.id && keepHulls) { c.save(); c.setLineDash([6, 4]); c.lineWidth = 3; c.strokeStyle = '#1e5fd0'; c.stroke(); c.restore(); }
+        hs.push({ id: t.id, poly: hp, top: tops.get(t.id), x: t.x });
+      }
+    }
+    const g = L.shadowGrid(F.trees);
+    for (let x = 0; x < L.W; x++) {   // 地上那条光带：苗那么高（第 1、2 格）能晒到多少
+      const q = Math.max(0, L.C_LIGHT - (L.gv(g, x, 1) + L.gv(g, x, 2)) / 2 + L.A_SH) / (L.C_LIGHT + L.A_SH);
+      const v = Math.floor(40 + 215 * q);
+      c.fillStyle = `rgb(${v},${v},${Math.floor(v * 0.6)})`; c.fillRect(x * S, (h - 5) * S, S, 4 * S);
+    }
+    if (tgt) {   // 号只写给描黑边的那几棵，挨得近的往下错一格
+      const placed = [];
+      c.font = '12px sans-serif';
+      for (const t of order.filter(t => shaders.has(t.id))) {
+        let [tx, ty] = P(t.x, tops.get(t.id));
+        while (placed.some(([px, py]) => Math.abs(tx - px) < 34 && Math.abs(ty - py) < 16)) ty += 16;
+        placed.push([tx, ty]);
+        c.fillStyle = '#fff'; c.fillRect(tx - 17, ty - 16, 34, 15); c.fillStyle = sel === t.id ? '#1e5fd0' : '#000'; c.fillText(String(t.id), tx - 14, ty - 4);
+      }
+    }
+    if (tgt) {   // 第一个 03:26：两个生人都说红的细细一条、很容易看丢。树脚底下地里插一面小红旗
+      const [bx, by] = P(tgt.x, 0); c.fillStyle = 'rgb(220,40,30)';
+      c.beginPath(); c.moveTo(bx, by + 2); c.lineTo(bx - 7, by + 4 * S - 2); c.lineTo(bx + 7, by + 4 * S - 2); c.closePath(); c.fill();
+      c.fillStyle = '#fff'; c.font = '11px sans-serif'; c.fillText(String(tgt.id), bx - 13, by + 4 * S + 12);
+    }
+    c.font = '13px sans-serif';
+    const cl = [];   // 第一个 03:43：棵网3 棵网4 都说砍多了地上的红字叠成一团，挨得近的往下错一行
+    for (const k of cuts) {   // 砍过的地方：地上一道红桩写号和年
+      const X = k.x * S; c.strokeStyle = 'rgb(200,40,40)'; c.lineWidth = 4;
+      c.beginPath(); c.moveTo(X, Hh - 2); c.lineTo(X, Hh - 18); c.stroke();
+      let row = 0; while (cl.some(([x, r]) => r === row && Math.abs(x - X) < 62)) row++;
+      cl.push([X, row]);
+      c.fillStyle = 'rgb(200,40,40)'; c.font = '11px sans-serif'; c.fillText(`${k.id}号·${k.year}`, X - 10, Hh + 14 + row * 13);
+    }
+    const rows = cl.length ? Math.max(...cl.map(r => r[1])) : 0;
+    if (rows) { const img = c.getImageData(0, 0, canvas.width, canvas.height); canvas.height = Hh + 46 + rows * 13; c.fillStyle = 'rgb(240,238,228)'; c.fillRect(0, 0, canvas.width, canvas.height); c.putImageData(img, 0, 0); }
+    c.fillStyle = '#282828'; c.font = '14px sans-serif'; c.fillText(title || `第 ${F.year} 年`, 6, Hh + 38 + rows * 13);
+    if (keepHulls) hulls = { list: hs, h };
+  }
+
+  function redraw() { draw(cv, game.F, ME, game.cuts, null, true); }
+  function showStatus() { $('status').textContent = game.status().join('\n'); }
+  function setPick() {
+    if (game.over) { $('pick').textContent = ''; $('cutb').disabled = true; return; }
+    if (game.cutThis) { $('pick').textContent = '这十年已经砍过一棵了。'; $('cutb').disabled = true; return; }
+    if (sel === null) { $('pick').textContent = '点图上的一棵树，选中它。'; $('cutb').disabled = true; return; }
+    const t = game.F.trees.find(u => u.id === sel);
+    if (!t) { sel = null; return setPick(); }
+    const me = game.mine();
+    $('pick').textContent = `选中 ${t.id} 号（${Y.K[t.kind]}，高 ${L.height(t).toFixed(0)}，树脚离它 ${Math.abs(t.x - me.x).toFixed(0)}）`;
+    $('cutb').disabled = false; $('cutb').textContent = `砍 ${t.id} 号`;
+  }
+
+  cv.addEventListener('click', (e) => {
+    if (!game || game.over || game.cutThis) return;
+    const r = cv.getBoundingClientRect(), px = (e.clientX - r.left) * cv.width / r.width, py = (e.clientY - r.top) * cv.height / r.height;
+    const x = px / S, y = hulls.h - 6 - py / S;
+    let hit = hulls.list.filter(o => o.id !== ME && inPoly(x, y, o.poly)).sort((a, b) => a.top - b.top)[0];
+    if (!hit) { const near = hulls.list.filter(o => o.id !== ME && Math.abs(o.x - x) < 2).sort((a, b) => Math.abs(a.x - x) - Math.abs(b.x - x))[0]; hit = near; }
+    sel = hit ? hit.id : null; setPick(); redraw();
+  });
+  $('cutb').addEventListener('click', () => {
+    if (sel === null) return;
+    const msg = game.cut(sel); sel = null;
+    const d = document.createElement('div'); d.className = 'dec'; d.textContent = `第 ${game.F.year} 年  ${msg}`; $('log').appendChild(d);
+    setPick(); showStatus(); redraw();
+  });
+  $('passb').addEventListener('click', () => {
+    $('passb').disabled = true; $('cutb').disabled = true; $('pick').textContent = '林子在长……';
+    setTimeout(() => {
+      const r = game.pass(); sel = null;
+      const head = document.createElement('div'); head.className = 'dec'; head.textContent = `过了十年，到第 ${game.F.year} 年。`; $('log').appendChild(head);
+      if (!r.out.length) { const d = document.createElement('div'); d.textContent = '  它身边这十年没有树倒、也没有树熬出来。'; $('log').appendChild(d); }
+      for (const o of r.out) { const d = document.createElement('div'); if (o.mine) d.className = 'mine'; d.textContent = `  第 ${o.year} 年  ${o.text}`; $('log').appendChild(d); }
+      if (r.sum) { const d = document.createElement('div'); d.textContent = '  ' + r.sum; $('log').appendChild(d); }
+      showStatus(); redraw(); setPick();
+      if (game.over) finish(); else $('passb').disabled = false;
+    }, 30);
+  });
+
+  function finish() {
+    $('passb').disabled = true; $('pick').textContent = '';
+    const e = game.ending();
+    const end = $('end'); end.innerHTML = '';
+    const h = document.createElement('div'); h.innerHTML = '<b>—— 它这一辈子 ——</b>'; end.appendChild(h);
+    const p = document.createElement('div'); p.textContent = e.lines.map(s => '  ' + s).join('\n'); end.appendChild(p);
+    const o = document.createElement('div'); o.style.marginTop = '10px'; o.textContent = '要是你一棵没砍（同一片林子、同样的天气）：' + e.other; end.appendChild(o);
+    const c1 = document.createElement('canvas'), c2 = document.createElement('canvas');
+    draw(c1, game.F, ME, game.cuts, `第 ${game.F.year} 年，你砍过的`, false);
+    draw(c2, game.R, ME, [], `第 ${game.R.year} 年，一棵没砍`, false);
+    c1.style.marginTop = '12px'; c2.style.marginTop = '8px'; end.appendChild(c1); end.appendChild(c2);
+    const again = document.createElement('button'); again.textContent = '再来一局'; again.style.marginTop = '12px';
+    again.onclick = () => { start(); window.scrollTo(0, 0); }; end.appendChild(again);
+  }
+
+  let J = null;
+  function start() {
+    game = new Y.Game(J, ME); sel = null; $('cutb').textContent = '砍';   // 棵网3：再来一局后按钮上还留着上局的'砍 8218 号'
+    $('log').innerHTML = ''; $('end').innerHTML = ''; $('passb').disabled = false;
+    showStatus(); redraw(); setPick();
+  }
+  window._一棵 = { game: () => game, hulls: () => hulls };   // 给试的人（量的脚本）看一眼里面
+  fetch('start.json').then(r => r.json()).then(j => { J = j; start(); });
+})();
+</script>
+</body>
+</html>
